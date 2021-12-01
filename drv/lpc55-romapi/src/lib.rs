@@ -214,6 +214,107 @@ struct Version1DriverInterface {
     ) -> u32,
 }
 
+// This is the same as the v1 interface except the reserved fields are
+// omitted
+#[repr(C)]
+struct Version0DriverInterface {
+    version: StandardVersion,
+    /// flash_init: Set up function that must be called before any other
+    /// flash function. Note: set the CPU frequency in the flash config
+    /// otherwise the flash refresh rate may not be correct!
+    flash_init: unsafe extern "C" fn(config: &mut FlashConfig) -> u32,
+    /// flash_erase: Erases the flash. Need to pass ERASE_KEY for this to work
+    flash_erase: unsafe extern "C" fn(
+        config: &mut FlashConfig,
+        start: u32,
+        length: u32,
+        key: u32,
+    ) -> u32,
+    /// flash_program: write the bytes to flash
+    flash_program: unsafe extern "C" fn(
+        config: &mut FlashConfig,
+        start: u32,
+        src: *mut u32,
+        length: u32,
+    ) -> u32,
+    /// flash_verify_erase: Verify that the region is actually erased
+    flash_verify_erase: unsafe extern "C" fn(
+        config: &mut FlashConfig,
+        start: u32,
+        length: u32,
+    ) -> u32,
+    /// flash_verify_program: Verify that the region was programed
+    flash_verify_program: unsafe extern "C" fn(
+        config: &mut FlashConfig,
+        start: u32,
+        length: u32,
+        expectedData: *mut u32,
+        failedAddress: &mut u32,
+        failedData: &mut u32,
+    ) -> u32,
+    /// flash_get_property: Get a particular value from the flash. whichProperty
+    /// is technically an enum.
+    flash_get_property: unsafe extern "C" fn(
+        config: &mut FlashConfig,
+        whichProperty: u32,
+        value: &mut u32,
+    ) -> u32,
+    /// ffr_init: Initialize the FFR structure (needs to run before other
+    /// functions)
+    ffr_init: unsafe extern "C" fn(config: &mut FlashConfig) -> u32,
+    /// ffr_deinit: Prevent further writes to the protected flash for this
+    /// boot. Will reset on power cycle
+    ffr_deinit: unsafe extern "C" fn(config: &mut FlashConfig) -> u32,
+    /// write to the CMPA -- Don't write seal part unless you want to
+    /// prevent further writes
+    ffr_cust_factory_page_write: unsafe extern "C" fn(
+        config: &mut FlashConfig,
+        page_data: &[u8; FLASH_PAGE_SIZE],
+        seal_part: bool,
+    ) -> u32,
+    /// Get the UUID from the NXP area
+    ffr_get_uuid: unsafe extern "C" fn(
+        config: &mut FlashConfig,
+        uuid: &mut [u8; 32],
+    ) -> u32,
+    /// Read data from the CMPA (aka factory page)
+    ffr_get_customer_data: unsafe extern "C" fn(
+        config: &mut FlashConfig,
+        pdata: *mut u32,
+        offset: u32,
+        len: u32,
+    ) -> u32,
+    /// Write to the keystore
+    ffr_keystore_write: unsafe extern "C" fn(
+        config: &mut FlashConfig,
+        pKeyStore: *mut FfrKeyStore,
+    ) -> u32,
+    /// get the activation code
+    ffr_keystore_get_ac: unsafe extern "C" fn(
+        config: &mut FlashConfig,
+        ac: *mut [u32; ACTIVATION_CODE_SIZE / 4],
+    ) -> u32,
+    /// get a particular key code
+    ffr_keystore_get_kc: unsafe extern "C" fn(
+        config: &mut FlashConfig,
+        pKeyCode: &[u32; 13],
+        key_index: u32,
+    ) -> u32,
+    /// write to the CFPA aka in-field page
+    ffr_infield_page_write: unsafe extern "C" fn(
+        config: &mut FlashConfig,
+        page_data: &[u32; FLASH_PAGE_SIZE / 4],
+        valid_len: u32,
+    ) -> u32,
+    /// read the CFPA aka in-field page
+    ffr_get_customer_infield_data: unsafe extern "C" fn(
+        config: &mut FlashConfig,
+        pdata: *mut u32,
+        offset: u32,
+        len: u32,
+    ) -> u32,
+}
+
 #[derive(Debug)]
 #[repr(C)]
 struct KBSessionRef {
@@ -279,10 +380,191 @@ struct IAPInterface {
 }
 
 #[repr(C)]
-struct FlashDriverInterface {
+union FlashDriverInterface {
     /// This is technically a union for the v0 vs v1 ROM but we only care
     /// about the v1 on the Expresso board
     version1_flash_driver: &'static Version1DriverInterface,
+    version0_flash_driver: &'static Version0DriverInterface,
+}
+
+enum RomApiVersion {
+    RomApiV0,
+    RomApiV1,
+}
+
+impl FlashDriverInterface {
+    fn rom_api_version(&self) -> RomApiVersion {
+        if bootloader_tree().version.major == 3 {
+            return RomApiVersion::RomApiV1;
+        } else {
+            return RomApiVersion::RomApiV0;
+        }
+    }
+
+    unsafe fn flash_init(&self, config: &mut FlashConfig) -> u32 {
+        match self.rom_api_version() {
+            RomApiVersion::RomApiV1 => {
+                (self.version1_flash_driver.flash_init)(config)
+            }
+            RomApiVersion::RomApiV0 => {
+                (self.version0_flash_driver.flash_init)(config)
+            }
+        }
+    }
+
+    unsafe fn ffr_init(&self, config: &mut FlashConfig) -> u32 {
+        match self.rom_api_version() {
+            RomApiVersion::RomApiV1 => {
+                (self.version1_flash_driver.ffr_init)(config)
+            }
+            RomApiVersion::RomApiV0 => {
+                (self.version0_flash_driver.ffr_init)(config)
+            }
+        }
+    }
+
+    unsafe fn flash_verify_erase(
+        &self,
+        config: &mut FlashConfig,
+        start: u32,
+        length: u32,
+    ) -> u32 {
+        match self.rom_api_version() {
+            RomApiVersion::RomApiV1 => {
+                (self.version1_flash_driver.flash_verify_erase)(
+                    config, start, length,
+                )
+            }
+            RomApiVersion::RomApiV0 => {
+                (self.version0_flash_driver.flash_verify_erase)(
+                    config, start, length,
+                )
+            }
+        }
+    }
+
+    unsafe fn flash_program(
+        &self,
+        config: &mut FlashConfig,
+        start: u32,
+        src: *mut u32,
+        length: u32,
+    ) -> u32 {
+        match self.rom_api_version() {
+            RomApiVersion::RomApiV1 => {
+                (self.version1_flash_driver.flash_program)(
+                    config, start, src, length,
+                )
+            }
+            RomApiVersion::RomApiV0 => {
+                // NXP's function table is incorrect
+                let func = core::mem::transmute::<
+                    usize,
+                    fn(&mut FlashConfig, u32, *mut u32, u32) -> u32,
+                >(0x1300419d);
+                func(config, start, src, length)
+            }
+        }
+    }
+
+    unsafe fn ffr_keystore_get_kc(
+        &self,
+        config: &mut FlashConfig,
+        p_key_code: &[u32; 13],
+        key_index: u32,
+    ) -> u32 {
+        match self.rom_api_version() {
+            RomApiVersion::RomApiV1 => {
+                (self.version1_flash_driver.ffr_keystore_get_kc)(
+                    config, p_key_code, key_index,
+                )
+            }
+            RomApiVersion::RomApiV0 => {
+                (self.version0_flash_driver.ffr_keystore_get_kc)(
+                    config, p_key_code, key_index,
+                )
+            }
+        }
+    }
+
+    unsafe fn ffr_keystore_get_ac(
+        &self,
+        config: &mut FlashConfig,
+        ac: *mut [u32; ACTIVATION_CODE_SIZE / 4],
+    ) -> u32 {
+        match self.rom_api_version() {
+            RomApiVersion::RomApiV1 => {
+                (self.version1_flash_driver.ffr_keystore_get_ac)(config, ac)
+            }
+            RomApiVersion::RomApiV0 => {
+                (self.version0_flash_driver.ffr_keystore_get_ac)(config, ac)
+            }
+        }
+    }
+
+    unsafe fn ffr_keystore_write(
+        &self,
+        config: &mut FlashConfig,
+        p_key_store: *mut FfrKeyStore,
+    ) -> u32 {
+        match self.rom_api_version() {
+            RomApiVersion::RomApiV1 => (self
+                .version1_flash_driver
+                .ffr_keystore_write)(
+                config, p_key_store
+            ),
+            RomApiVersion::RomApiV0 => (self
+                .version0_flash_driver
+                .ffr_keystore_write)(
+                config, p_key_store
+            ),
+        }
+    }
+
+    unsafe fn ffr_get_customer_data(
+        &self,
+        config: &mut FlashConfig,
+        pdata: *mut u32,
+        offset: u32,
+        len: u32,
+    ) -> u32 {
+        match self.rom_api_version() {
+            RomApiVersion::RomApiV1 => {
+                (self.version1_flash_driver.ffr_get_customer_data)(
+                    config, pdata, offset, len,
+                )
+            }
+            RomApiVersion::RomApiV0 => {
+                (self.version0_flash_driver.ffr_get_customer_data)(
+                    config, pdata, offset, len,
+                )
+            }
+        }
+    }
+
+    unsafe fn flash_erase(
+        &self,
+        config: &mut FlashConfig,
+        start: u32,
+        length: u32,
+        key: u32,
+    ) -> u32 {
+        match self.rom_api_version() {
+            RomApiVersion::RomApiV1 => {
+                (self.version1_flash_driver.flash_erase)(
+                    config, start, length, key,
+                )
+            }
+            RomApiVersion::RomApiV0 => {
+                // NXP table is incorrect
+                let func = core::mem::transmute::<
+                    usize,
+                    fn(&mut FlashConfig, u32, u32, u32) -> u32,
+                >(0x1300413b);
+                func(config, start, length, key)
+            }
+        }
+    }
 }
 
 #[repr(C)]
@@ -510,20 +792,15 @@ pub unsafe fn flash_erase(addr: u32, len: u32) -> Result<(), FlashStatus> {
 
     check_addr_len_alignment(addr, len)?;
 
-    handle_flash_status((bootloader_tree()
-        .flash_driver
-        .version1_flash_driver
-        .flash_init)(&mut f))?;
+    handle_flash_status(bootloader_tree().flash_driver.flash_init(&mut f))?;
 
-    handle_flash_status((bootloader_tree()
-        .flash_driver
-        .version1_flash_driver
-        .ffr_init)(&mut f))?;
+    handle_flash_status(bootloader_tree().flash_driver.ffr_init(&mut f))?;
 
-    handle_flash_status((bootloader_tree()
-        .flash_driver
-        .version1_flash_driver
-        .flash_erase)(&mut f, addr, len, ERASE_KEY))
+    handle_flash_status(
+        bootloader_tree()
+            .flash_driver
+            .flash_erase(&mut f, addr, len, ERASE_KEY),
+    )
 }
 
 pub unsafe fn flash_write(
@@ -538,22 +815,17 @@ pub unsafe fn flash_write(
 
     check_addr_len_alignment(addr, len)?;
 
-    handle_flash_status((bootloader_tree()
-        .flash_driver
-        .version1_flash_driver
-        .flash_init)(&mut f))?;
+    handle_flash_status(bootloader_tree().flash_driver.flash_init(&mut f))?;
 
-    handle_flash_status((bootloader_tree()
-        .flash_driver
-        .version1_flash_driver
-        .ffr_init)(&mut f))?;
+    handle_flash_status(bootloader_tree().flash_driver.ffr_init(&mut f))?;
 
     // XXX so much more validation needed
 
-    handle_flash_status((bootloader_tree()
-        .flash_driver
-        .version1_flash_driver
-        .flash_program)(&mut f, addr, buffer, len))
+    handle_flash_status(
+        bootloader_tree()
+            .flash_driver
+            .flash_program(&mut f, addr, buffer, len),
+    )
 }
 
 /*
@@ -565,10 +837,7 @@ pub fn validate_programmed(start: u32, len: u32) -> bool {
     f.mode_config.sys_freq_in_mhz = 100;
 
     let ret = handle_flash_status(unsafe {
-        (bootloader_tree()
-            .flash_driver
-            .version1_flash_driver
-            .flash_init)(&mut f)
+        bootloader_tree().flash_driver.flash_init(&mut f)
     });
 
     if ret.is_err() {
@@ -576,10 +845,7 @@ pub fn validate_programmed(start: u32, len: u32) -> bool {
     }
 
     let ret = handle_flash_status(unsafe {
-        (bootloader_tree()
-            .flash_driver
-            .version1_flash_driver
-            .ffr_init)(&mut f)
+        bootloader_tree().flash_driver.ffr_init(&mut f)
     });
 
     if ret.is_err() {
@@ -587,10 +853,9 @@ pub fn validate_programmed(start: u32, len: u32) -> bool {
     }
 
     let v = handle_flash_status(unsafe {
-        (bootloader_tree()
+        bootloader_tree()
             .flash_driver
-            .version1_flash_driver
-            .flash_verify_erase)(&mut f, start, len)
+            .flash_verify_erase(&mut f, start, len)
     });
 
     // This looks backwards because we're validating that something is
@@ -611,24 +876,17 @@ pub fn get_key_code(
     f.mode_config.sys_freq_in_mhz = 100;
 
     handle_flash_status(unsafe {
-        (bootloader_tree()
-            .flash_driver
-            .version1_flash_driver
-            .flash_init)(&mut f)
+        bootloader_tree().flash_driver.flash_init(&mut f)
     })?;
 
     handle_flash_status(unsafe {
-        (bootloader_tree()
-            .flash_driver
-            .version1_flash_driver
-            .ffr_init)(&mut f)
+        bootloader_tree().flash_driver.ffr_init(&mut f)
     })?;
 
     handle_flash_status(unsafe {
-        (bootloader_tree()
+        bootloader_tree()
             .flash_driver
-            .version1_flash_driver
-            .ffr_keystore_get_kc)(&mut f, key_code, idx as u32)
+            .ffr_keystore_get_kc(&mut f, key_code, idx as u32)
     })
 }
 
@@ -639,24 +897,17 @@ pub fn get_activation_code(
     f.mode_config.sys_freq_in_mhz = 100;
 
     handle_flash_status(unsafe {
-        (bootloader_tree()
-            .flash_driver
-            .version1_flash_driver
-            .flash_init)(&mut f)
+        bootloader_tree().flash_driver.flash_init(&mut f)
     })?;
 
     handle_flash_status(unsafe {
-        (bootloader_tree()
-            .flash_driver
-            .version1_flash_driver
-            .ffr_init)(&mut f)
+        bootloader_tree().flash_driver.ffr_init(&mut f)
     })?;
 
     handle_flash_status(unsafe {
-        (bootloader_tree()
+        bootloader_tree()
             .flash_driver
-            .version1_flash_driver
-            .ffr_keystore_get_ac)(&mut f, ac)
+            .ffr_keystore_get_ac(&mut f, ac)
     })
 }
 
@@ -665,24 +916,17 @@ pub fn write_keystore(key_store: &mut FfrKeyStore) -> Result<(), FlashStatus> {
     f.mode_config.sys_freq_in_mhz = 100;
 
     handle_flash_status(unsafe {
-        (bootloader_tree()
-            .flash_driver
-            .version1_flash_driver
-            .flash_init)(&mut f)
+        bootloader_tree().flash_driver.flash_init(&mut f)
     })?;
 
     handle_flash_status(unsafe {
-        (bootloader_tree()
-            .flash_driver
-            .version1_flash_driver
-            .ffr_init)(&mut f)
+        bootloader_tree().flash_driver.ffr_init(&mut f)
     })?;
 
     handle_flash_status(unsafe {
-        (bootloader_tree()
+        bootloader_tree()
             .flash_driver
-            .version1_flash_driver
-            .ffr_keystore_write)(&mut f, key_store)
+            .ffr_keystore_write(&mut f, key_store)
     })
 }
 
@@ -697,25 +941,19 @@ pub fn get_cmpa_data(
     f.mode_config.sys_freq_in_mhz = 100;
 
     handle_flash_status(unsafe {
-        (bootloader_tree()
-            .flash_driver
-            .version1_flash_driver
-            .flash_init)(&mut f)
+        bootloader_tree().flash_driver.flash_init(&mut f)
     })?;
 
     handle_flash_status(unsafe {
-        (bootloader_tree()
-            .flash_driver
-            .version1_flash_driver
-            .ffr_init)(&mut f)
+        bootloader_tree().flash_driver.ffr_init(&mut f)
     })?;
 
     handle_flash_status(unsafe {
-        (bootloader_tree()
-            .flash_driver
-            .version1_flash_driver
-            .ffr_get_customer_data)(
-            &mut f, data.as_mut_ptr(), offset, len
+        bootloader_tree().flash_driver.ffr_get_customer_data(
+            &mut f,
+            data.as_mut_ptr(),
+            offset,
+            len,
         )
     })
 }
